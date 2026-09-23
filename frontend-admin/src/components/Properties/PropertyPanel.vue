@@ -166,6 +166,44 @@
           </div>
         </div>
 
+        <!-- 外观预设 -->
+        <div v-if="element" class="property-group">
+          <div class="group-title">
+            外观预设
+            <span class="hint">(只覆盖外观，不改位置尺寸与旋转)</span>
+          </div>
+          <div class="preset-save-row">
+            <el-input
+              v-model="presetName"
+              size="small"
+              placeholder="预设名称"
+              maxlength="20"
+              @keyup.enter="savePreset"
+            />
+            <el-button
+              size="small"
+              type="primary"
+              :disabled="!hasAppearance"
+              @click="savePreset"
+            >存为预设</el-button>
+          </div>
+          <div v-if="!hasAppearance" class="preset-tip">
+            {{ typeLabel(element.type) }}元件没有可保存的外观项
+          </div>
+          <div v-if="presetStore.presets.length" class="preset-list">
+            <div v-for="preset in presetStore.presets" :key="preset.id" class="preset-item">
+              <span class="preset-name" :title="preset.name">{{ preset.name }}</span>
+              <el-tag size="small" type="info" effect="plain">{{ typeLabel(preset.sourceType) }}</el-tag>
+              <div class="preset-ops">
+                <el-button size="small" link @click="applyPreset(preset)">套用</el-button>
+                <el-button size="small" link @click="renamePreset(preset)">改名</el-button>
+                <el-button size="small" link type="danger" @click="removePreset(preset)">移除</el-button>
+              </div>
+            </div>
+          </div>
+          <el-empty v-else description="暂无预设" :image-size="40" />
+        </div>
+
         <!-- 操作按钮 -->
         <div class="property-group">
           <div class="group-title">元件对齐 <span class="hint">(Ctrl+点击多选后可用)</span></div>
@@ -193,9 +231,17 @@
 </template>
 
 <script setup>
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useCanvasStore } from '@/stores/canvas'
-import { ElMessage } from 'element-plus'
+import { usePresetStore } from '@/stores/presets'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  typeLabel,
+  fieldLabel,
+  supportsAppearance,
+  extractAppearance,
+  planApply
+} from '@/utils/appearancePresets'
 
 const barcodeFormats = [
   { value: 'CODE128', label: 'Code 128' },
@@ -239,6 +285,112 @@ watch(element, (el) => {
     })
   }
 }, { immediate: true, deep: true })
+
+// ========== 外观预设 ==========
+const presetStore = usePresetStore()
+const presetName = ref('')
+// 当前选中元件是否有可保存/套用的外观项
+const hasAppearance = computed(() => !!element.value && supportsAppearance(element.value.type))
+
+// 把当前元件的外观按名称保存为预设
+const savePreset = () => {
+  const el = element.value
+  if (!el) {
+    ElMessage.warning('请先选择元件')
+    return
+  }
+  if (!supportsAppearance(el.type)) {
+    ElMessage.warning(`${typeLabel(el.type)}元件没有可保存的外观项`)
+    return
+  }
+
+  const { values } = extractAppearance(el)
+  const result = presetStore.addPreset({
+    name: presetName.value,
+    sourceType: el.type,
+    values
+  })
+
+  if (!result.ok) {
+    // 名称为空 / 重名：说明是哪里不合要求，并定位到名称输入
+    ElMessage.error(result.message)
+    return
+  }
+  ElMessage.success(`预设“${result.preset.name}”已保存`)
+  presetName.value = ''
+}
+
+// 一键套用预设：仅覆盖共有外观项，坐标/宽高/旋转保持不变
+const applyPreset = (preset) => {
+  const el = element.value
+  if (!el) {
+    ElMessage.warning('请先选择元件')
+    return
+  }
+
+  const { updates, appliedKeys, skippedKeys } = planApply(preset, el.type)
+
+  if (appliedKeys.length === 0) {
+    // 双方没有任何共有外观项
+    const skipped = skippedKeys.map(fieldLabel).join('、')
+    ElMessage.warning(
+      `「${preset.name}」是${typeLabel(preset.sourceType)}预设（含：${skipped}），` +
+      `与${typeLabel(el.type)}元件没有可共用的外观项，未套用任何样式`
+    )
+    return
+  }
+
+  // 只更新外观字段，x/y/width/height/rotation 不在 updates 中
+  store.updateElement(el.id, updates)
+  Object.assign(formData, updates)
+
+  const applied = appliedKeys.map(fieldLabel).join('、')
+  if (skippedKeys.length > 0) {
+    const skipped = skippedKeys.map(fieldLabel).join('、')
+    ElMessage.warning(
+      `已套用共有外观项：${applied}；「${preset.name}」中的 ${skipped} ` +
+      `${typeLabel(el.type)}元件不支持，已跳过（位置、尺寸与旋转保持不变）`
+    )
+  } else {
+    ElMessage.success(`已套用预设“${preset.name}”：${applied}（位置、尺寸与旋转保持不变）`)
+  }
+}
+
+const renamePreset = async (preset) => {
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的预设名称', '预设改名', {
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+      inputValue: preset.name,
+      inputValidator: (value) => {
+        const name = (value || '').trim()
+        if (!name) return '预设名称不能为空'
+        const duplicated = presetStore.presets.some(p => p.id !== preset.id && p.name === name)
+        if (duplicated) return `已存在名为“${name}”的预设，请换一个名称`
+        return true
+      }
+    })
+    const result = presetStore.renamePreset(preset.id, value)
+    if (result.ok) ElMessage.success('已改名')
+    else ElMessage.error(result.message)
+  } catch {
+    // 用户取消
+  }
+}
+
+const removePreset = async (preset) => {
+  try {
+    await ElMessageBox.confirm(
+      `确定移除预设“${preset.name}”吗？已套用该预设的元件不受影响。`,
+      '移除预设',
+      { confirmButtonText: '移除', cancelButtonText: '取消', type: 'warning' }
+    )
+    presetStore.removePreset(preset.id)
+    ElMessage.success('已移除预设')
+  } catch {
+    // 用户取消
+  }
+}
 
 const updateProp = (key) => {
   if (element.value) {
@@ -364,6 +516,57 @@ const remove = () => {
 
 .action-buttons {
   display: flex; gap: 8px; justify-content: center;
+}
+
+.preset-save-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.preset-tip {
+  font-size: 11px;
+  color: #e6a23c;
+  margin-bottom: 8px;
+}
+
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.preset-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: #f5f7fa;
+  border-radius: 4px;
+
+  .preset-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    color: #303133;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .preset-ops {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+
+    :deep(.el-button) {
+      padding: 0 2px;
+      height: auto;
+      font-size: 12px;
+    }
+  }
 }
 
 .cell-editor-grid {
