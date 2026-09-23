@@ -24,6 +24,28 @@
           </el-form-item>
         </div>
 
+        <!-- 外观预设 -->
+        <div v-if="supportsPreset" class="property-group">
+          <div class="group-title">外观预设 <span class="hint">(只含外观，不含位置尺寸)</span></div>
+          <el-button size="small" type="primary" plain class="save-preset-btn" @click="savePreset">
+            将当前外观存为预设
+          </el-button>
+          <div class="preset-list">
+            <div v-for="preset in presetStore.presets" :key="preset.id" class="preset-item">
+              <div class="preset-info">
+                <span class="preset-name" :title="preset.name">{{ preset.name }}</span>
+                <span class="preset-type">{{ getTypeLabel(preset.sourceType) }}</span>
+              </div>
+              <div class="preset-ops">
+                <el-button size="small" text type="primary" @click="applyPreset(preset.id)">套用</el-button>
+                <el-button size="small" text @click="renamePreset(preset)">改名</el-button>
+                <el-button size="small" text type="danger" @click="removePreset(preset.id)">移除</el-button>
+              </div>
+            </div>
+            <div v-if="presetStore.presets.length === 0" class="preset-empty">暂无预设</div>
+          </div>
+        </div>
+
         <!-- 文本属性 -->
         <div v-if="element.type === 'text'" class="property-group">
           <div class="group-title">文本属性</div>
@@ -195,7 +217,8 @@
 <script setup>
 import { computed, reactive, watch } from 'vue'
 import { useCanvasStore } from '@/stores/canvas'
-import { ElMessage } from 'element-plus'
+import { usePresetStore, PRESET_ELEMENT_TYPES, ELEMENT_TYPE_LABELS } from '@/stores/presets'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const barcodeFormats = [
   { value: 'CODE128', label: 'Code 128' },
@@ -321,6 +344,90 @@ const remove = () => {
   store.deleteElement(element.value.id)
   ElMessage.success('已删除')
 }
+
+// ===== 外观预设 =====
+const presetStore = usePresetStore()
+const supportsPreset = computed(() => !!element.value && PRESET_ELEMENT_TYPES.includes(element.value.type))
+const getTypeLabel = (type) => ELEMENT_TYPE_LABELS[type] || type
+
+const savePreset = async () => {
+  if (!element.value) return
+  try {
+    const { value } = await ElMessageBox.prompt('请输入预设名称', '保存外观预设', {
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+      inputPattern: /\S+/,
+      inputErrorMessage: '预设名称不能为空或纯空白',
+      inputPlaceholder: '例如：标题文字、红色边框'
+    })
+    const result = presetStore.savePreset(value, element.value)
+    if (result.ok) {
+      ElMessage.success(`预设「${result.preset.name}」已保存`)
+    } else {
+      ElMessage.error(result.message)
+    }
+  } catch (action) {
+    // 用户点击取消，无需提示
+  }
+}
+
+const applyPreset = (presetId) => {
+  if (!element.value) return
+  const result = presetStore.resolveApply(presetId, element.value)
+  if (!result.ok) {
+    ElMessage.error(result.message)
+    return
+  }
+  const { preset, updates, appliedLabels, skippedLabels } = result
+  if (Object.keys(updates).length === 0) {
+    const skippedText = skippedLabels.length > 0 ? `；其中${skippedLabels.join('、')}不适用于${getTypeLabel(element.value.type)}` : ''
+    ElMessage.warning(
+      `预设「${preset.name}」(来源：${getTypeLabel(preset.sourceType)})与当前${getTypeLabel(element.value.type)}元件没有共有的外观项，未套用任何样式${skippedText}`
+    )
+    return
+  }
+  // 仅更新外观字段；x/y/width/height/rotation 不在 updates 中，保持套用前记录
+  store.updateElement(element.value.id, updates)
+  if (element.value.type === preset.sourceType) {
+    ElMessage.success(`已套用预设「${preset.name}」：${appliedLabels.join('、')}`)
+  } else {
+    const skippedText = skippedLabels.length > 0
+      ? `；该预设中${skippedLabels.join('、')}不适用于${getTypeLabel(element.value.type)}，已跳过`
+      : ''
+    ElMessage.warning(
+      `预设「${preset.name}」来自${getTypeLabel(preset.sourceType)}，仅套用双方共有的外观：${appliedLabels.join('、')}${skippedText}`
+    )
+  }
+}
+
+const renamePreset = async (preset) => {
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的预设名称', '预设改名', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputValue: preset.name,
+      inputPattern: /\S+/,
+      inputErrorMessage: '预设名称不能为空或纯空白'
+    })
+    const result = presetStore.renamePreset(preset.id, value)
+    if (result.ok) {
+      ElMessage.success('已改名')
+    } else {
+      ElMessage.error(result.message)
+    }
+  } catch (action) {
+    // 用户点击取消
+  }
+}
+
+const removePreset = (presetId) => {
+  const result = presetStore.removePreset(presetId)
+  if (result.ok) {
+    ElMessage.success(`预设「${result.preset.name}」已移除`)
+  } else {
+    ElMessage.error(result.message)
+  }
+}
 </script>
 
 <style lang="scss" scoped>
@@ -364,6 +471,67 @@ const remove = () => {
 
 .action-buttons {
   display: flex; gap: 8px; justify-content: center;
+}
+
+.save-preset-btn {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.preset-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 4px 6px;
+  background: #f5f7fa;
+  border-radius: 4px;
+}
+
+.preset-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+
+  .preset-name {
+    font-size: 12px;
+    color: #303133;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 96px;
+  }
+
+  .preset-type {
+    font-size: 11px;
+    color: #909399;
+  }
+}
+
+.preset-ops {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+
+  :deep(.el-button) {
+    padding: 2px 4px;
+    font-size: 12px;
+    min-height: auto;
+  }
+}
+
+.preset-empty {
+  font-size: 12px;
+  color: #c0c4cc;
+  text-align: center;
+  padding: 6px 0;
 }
 
 .cell-editor-grid {
